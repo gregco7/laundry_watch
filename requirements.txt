@@ -1,0 +1,16 @@
+# Server
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
+
+# ML / signal
+numpy
+scipy
+scikit-learn
+hmmlearn
+joblib
+matplotlib
+
+# Test
+pytest

@@ -1,1 +1,18 @@
 .DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Local database (SQLite)
+*.db
+*.sqlite3
+
+# Web
+node_modules/
+web/dist/
+
+# Notes: recordings/ and labels/ ARE committed on purpose -- they are the dataset.
