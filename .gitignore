@@ -1,6 +1,9 @@
 .DS_Store
 CLAUDE.md
 
+# Local environment -- machine-specific paths, never committed
+.env
+
 # Python
 __pycache__/
 *.py[cod]
