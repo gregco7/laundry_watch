@@ -4,6 +4,11 @@ CLAUDE.md
 # Local environment -- machine-specific paths, never committed
 .env
 
+#Random Stuff not relevant to others
+.HARDWARE_HANDOFF.md
+tools/autoflash.sh
+
+
 # Python
 __pycache__/
 *.py[cod]
