@@ -5,8 +5,9 @@ CLAUDE.md
 .env
 
 #Random Stuff not relevant to others
-.HARDWARE_HANDOFF.md
+.HANDOFF.md
 tools/autoflash.sh
+.bullets.md
 
 
 # Python
@@ -25,4 +26,7 @@ node_modules/
 web/dist/
 
 # Notes: recordings/ and labels/ ARE committed on purpose -- they are the dataset.
-HARDWARE_HANDOFF.md
+HANDOFF.md
+
+# Node WiFi credentials
+firmware/secrets.py
