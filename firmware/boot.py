@@ -1,3 +1,4 @@
+# Lives on Node/ESP32
 # Runs on every boot, before main.py.
 #
 # Brings up WiFi with retries, then starts WebREPL. Order matters, and so does
@@ -17,7 +18,6 @@ ATTEMPTS = 4          # rounds of connect
 WAIT_PER_ATTEMPT = 15 # seconds each -- worst case 60s, still bounded
 
 wlan = network.WLAN(network.STA_IF)
-
 
 def _connect():
     for attempt in range(ATTEMPTS):
