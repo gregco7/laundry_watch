@@ -1,0 +1,24 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/venv/bin/python",
+  "python.languageServer": "Pylance",
+
+  // MicroPython stubs so `machine`, `micropython`, and time.ticks_us resolve.
+  // typings/ is Pylance's default stubPath and outranks CPython's typeshed,
+  // which is what makes the firmware-only modules win. Do NOT add
+  // typeshedPaths here -- that swaps the whole stdlib for MicroPython's
+  // 27-module subset and breaks laptop code (verified: it made os.environ
+  // vanish in tools/wrepl.py).
+  "python.analysis.stubPath": "${workspaceFolder}/typings",
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportMissingModuleSource": "none"
+  },
+
+  // Pylance is the only analyzer for this repo. mypy and pylint don't read
+  // typings/, so they'd keep flagging `machine`/`micropython` forever.
+  // Silenced here (workspace-only) rather than uninstalled -- other projects
+  // still get them. ignorePatterns is the belt to enabled's suspenders.
+  "pylint.enabled": false,
+  "pylint.ignorePatterns": ["**/*.py"],
+  "mypy-type-checker.enabled": false,
+  "mypy-type-checker.ignorePatterns": ["**/*.py"]
+}
