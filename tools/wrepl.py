@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive the mounted ESP32 node over WiFi. Two commands: `run` and `put`.
+"""Drive the mounted ESP32 node over WiFi. Three commands: `run`, `put`, `interrupt`.
 
 WHY THIS EXISTS
 The DevKit v1 has a single micro-USB port, so laptop power and wall power can
@@ -25,6 +25,11 @@ Three layers, stacked:
    multi-line file pastes cleanly instead of being mangled. Output comes back
    as `OK<stdout>\\x04<stderr>\\x04>`.
 
+   Ctrl-C (0x03) is the same idea in reverse: the byte raises KeyboardInterrupt
+   in whatever is currently running. `interrupt` sends only that and skips raw
+   mode entirely -- a board busy inside main.py's loop never answers the
+   Ctrl-A handshake, so asking for it first would just time out.
+
 `put` sends files as base64 chunks through raw mode rather than using WebREPL's
 binary transfer protocol -- it reuses the machinery already here, and chunking
 means board RAM never has to hold the whole file at once.
@@ -38,6 +43,7 @@ USAGE
     python3 tools/wrepl.py put firmware/main.py
     python3 tools/wrepl.py put firmware/sensor.py lib/sensor.py
     python3 tools/wrepl.py put firmware/boot.py --force
+    python3 tools/wrepl.py interrupt
 """
 
 import argparse
@@ -100,18 +106,24 @@ def mask_frame(payload, opcode=0x01):
 
 
 class WebREPL:
-    def __init__(self, host, password, port=WEBREPL_PORT, timeout=10):
+    def __init__(self, host, password, port=WEBREPL_PORT, timeout=10, raw=True):
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.settimeout(timeout)
         self.buf = b""
+        self.raw = raw
         self._handshake(host, port)
         self.read_until(b"Password:")
         self.send(password + "\r\n")
         banner = self.read_until(b">>>")
         if b"connected" not in banner:
             raise RuntimeError("login failed: %r" % banner[-200:])
-        self.send("\x01")                      # enter raw REPL
-        self.read_until(b"raw REPL")
+        # webrepl prints "WebREPL connected\n>>> " itself on auth, so the banner
+        # arrives even when a script is running and the REPL is not at a prompt.
+        # Raw mode is different: it needs the interpreter to be listening, so a
+        # busy board would silently time out here. `interrupt` passes raw=False.
+        if raw:
+            self.send("\x01")                  # enter raw REPL
+            self.read_until(b"raw REPL")
 
     def _handshake(self, host, port):
         key = base64.b64encode(os.urandom(16)).decode()
@@ -184,7 +196,8 @@ class WebREPL:
 
     def close(self):
         try:
-            self.send("\x02")                  # back to the friendly REPL
+            if self.raw:
+                self.send("\x02")              # back to the friendly REPL
             self.sock.close()
         except OSError:
             pass
@@ -199,6 +212,37 @@ def cmd_run(ws, args):
         print(stderr, end="", file=sys.stderr)
         return 1
     return 0
+
+
+def cmd_interrupt(ws, args):
+    """Send Ctrl-C to whatever is running, and confirm we got a prompt back.
+
+    This is the rescue hatch for firmware/main.py. KeyboardInterrupt is not an
+    OSError, so none of that file's guards catch it -- the loop unwinds and the
+    board drops to a REPL.
+
+    Three are sent, spaced out. A Ctrl-C landing while the interpreter sits in a
+    blocking socket call (the POST) is recorded but not raised until that call
+    returns, so a single byte can look like it did nothing.
+    """
+    for _ in range(3):
+        ws.send("\x03")
+        time.sleep(0.4)
+
+    tail = ws.read_until(b">>>", timeout=8).decode(errors="replace").strip()
+
+    if ">>>" in tail:
+        print("interrupted -- board is at a prompt")
+        if tail:
+            print(tail)
+        return 0
+
+    # No prompt. Either nothing was running, or the loop never yields to the
+    # network stack and cannot be reached this way -- the case the PAUSE file
+    # exists for, recoverable only by power-cycling and racing the boot.
+    print("no prompt after Ctrl-C. device said:", file=sys.stderr)
+    print(tail or "(nothing)", file=sys.stderr)
+    return 1
 
 
 def guard_boot_py(args):
@@ -273,15 +317,21 @@ def main():
     u.add_argument("--force", action="store_true",
                    help="allow overwriting boot.py")
 
+    sub.add_parser("interrupt",
+                   help="send Ctrl-C to stop whatever is running on the device")
+
     args = p.parse_args()
-    if not Path(args.file).is_file():
-        sys.exit("no such file: %s" % args.file)
+    if args.cmd in ("run", "put"):
+        if not Path(args.file).is_file():
+            sys.exit("no such file: %s" % args.file)
     if args.cmd == "put":
         guard_boot_py(args)
 
     host, pw = config()
     try:
-        ws = WebREPL(host, pw, timeout=10)
+        # A board busy in main.py's loop cannot enter raw mode, so `interrupt`
+        # must connect without asking for it.
+        ws = WebREPL(host, pw, timeout=10, raw=args.cmd != "interrupt")
     except OSError as e:
         sys.exit("could not reach %s:%d -- %s\n"
                  "  node powered? IP drifted? check the Orbi's client list."
@@ -289,8 +339,9 @@ def main():
     except RuntimeError as e:
         sys.exit(str(e))
 
+    handlers = {"run": cmd_run, "put": cmd_put, "interrupt": cmd_interrupt}
     try:
-        return cmd_run(ws, args) if args.cmd == "run" else cmd_put(ws, args)
+        return handlers[args.cmd](ws, args)
     finally:
         ws.close()
 
