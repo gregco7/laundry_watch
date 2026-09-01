@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -45,11 +46,14 @@ from server.models import Cycle, Machine, Mark
 from server.schemas import (
     CycleOut,
     CycleStart,
+    EmptyIn,
     MachineOut,
     MarkIn,
     MarkOut,
+    PhaseEvent,
     ReadingAck,
     ReadingIn,
+    StatusOut,
 )
 
 # Five minutes of pre-roll. Long enough that a late Start still catches the
@@ -60,6 +64,11 @@ RING_SECONDS = 300.0
 # What GET /live hands the dashboard. ~60 windows is about 2.5 minutes at
 # 100 Hz -- enough of a strip chart to see agitate turn into spin.
 LIVE_WINDOWS = 60
+
+# How long the node can go quiet before the screen stops claiming to know what
+# the washer is doing. Windows arrive every ~2.6 s, so 20 s is roughly seven
+# missed in a row -- past the point where a WiFi retry explains it.
+SILENT_AFTER = 20.0
 
 RECORDINGS = Path(os.environ.get("LAUNDRY_RECORDINGS") or REPO_ROOT / "analysis" / "recordings")
 
@@ -294,8 +303,116 @@ def live() -> dict[str, Any]:
     return {"now": now, "buffered": len(_buffer), "nodes": nodes, "series": series}
 
 
+@app.post("/cycles/{cycle_id}/empty", response_model=CycleOut)
+def empty_cycle(cycle_id: int, body: EmptyIn, session: Session = Depends(get_session)) -> Cycle:
+    """Someone took the laundry out."""
+    cycle = session.get(Cycle, cycle_id)
+    if cycle is None:
+        raise HTTPException(404, f"no cycle {cycle_id}")
+    cycle.emptied_at = time.time()
+    cycle.emptied_by = body.by
+    session.commit()
+    return cycle
+
+
+@app.get("/status", response_model=StatusOut)
+def status(machine_id: str = "washer-01", session: Session = Depends(get_session)) -> StatusOut:
+    """One request, one of four states. Everything the status screen renders.
+
+    `phase` is currently the last phase a HUMAN marked, not a prediction --
+    there is no model yet. `predicted` says which it is, so the screen can be
+    honest rather than implying the system worked it out. When
+    pipeline/model.py lands, only this function changes.
+    """
+    now = time.time()
+
+    with _lock:
+        node = dict(_nodes.get(machine_id, {}))
+    last_seen = node.get("last_seen")
+    silent_for = None if last_seen is None else round(now - last_seen, 1)
+    sensor_ok = silent_for is not None and silent_for <= SILENT_AFTER
+
+    def marks_of(cycle: Cycle) -> list[Mark]:
+        return list(session.scalars(select(Mark).where(Mark.cycle_id == cycle.id).order_by(Mark.t)))
+
+    open_cycle = _open_cycle(session, machine_id)
+    latest = session.scalar(
+        select(Cycle).where(Cycle.machine_id == machine_id).order_by(Cycle.started_at.desc())
+    )
+
+    # Offline outranks everything. A screen that keeps showing the last known
+    # phase while the sensor is gone looks exactly like a screen that knows.
+    if not sensor_ok:
+        last_phase = last_at = None
+        if latest is not None:
+            ms = marks_of(latest)
+            if ms:
+                last_phase, last_at = ms[-1].phase, ms[-1].t
+        return StatusOut(
+            mode="offline", now=now, sensor_ok=False, silent_for=silent_for,
+            last_known_phase=last_phase, last_known_at=last_at,
+        )
+
+    # An open cycle is more interesting than a finished one -- a new wash
+    # started means the last one stopped mattering, emptied or not.
+    cycle = open_cycle or latest
+
+    if cycle is not None:
+        ms = marks_of(cycle)
+        history = [PhaseEvent(at=m.t, phase=m.phase) for m in ms]
+
+        # Finished means either a `done` mark or a closed cycle. The mark comes
+        # first because it is the real event: in the finished product the model
+        # spots that transition and nobody taps End at all. Without this, a
+        # cycle marked done but left open reads as still running forever.
+        done_mark = next((m for m in reversed(ms) if m.phase == "done"), None)
+        finished_at = done_mark.t if done_mark is not None else cycle.ended_at
+
+        if finished_at is not None and cycle.emptied_at is None:
+            return StatusOut(
+                mode="done", now=now, sensor_ok=True, silent_for=silent_for,
+                cycle_id=cycle.id, finished_at=finished_at, history=history,
+            )
+
+        if finished_at is None and open_cycle is not None:
+            current = ms[-1] if ms else None
+            return StatusOut(
+                mode="running", now=now, sensor_ok=True, silent_for=silent_for,
+                cycle_id=cycle.id,
+                phase=current.phase if current else None,
+                phase_since=current.t if current else cycle.started_at,
+                history=history,
+            )
+
+        # Finished and emptied: idle, but the last load is still worth showing.
+        return StatusOut(
+            mode="idle", now=now, sensor_ok=True, silent_for=silent_for,
+            last_finished_at=finished_at,
+            last_emptied_at=cycle.emptied_at,
+            last_emptied_by=cycle.emptied_by,
+        )
+
+    return StatusOut(mode="idle", now=now, sensor_ok=True, silent_for=silent_for)
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     with _lock:
         buffered = len(_buffer)
     return {"ok": True, "buffered": buffered, "recordings": str(RECORDINGS)}
+
+
+# --------------------------------------------------------------------------
+# The dashboard
+#
+# Mounted LAST so it cannot shadow an API route, and only if a build exists.
+# Serving the built bundle from here rather than from `npm run dev` means the
+# marking instrument does not die with a dev server -- and there is one thing
+# to start before a wash instead of two.
+#
+#   cd web && npm run build      then open http://<laptop-ip>:8000/
+# --------------------------------------------------------------------------
+
+WEB_DIST = REPO_ROOT / "web" / "dist"
+if WEB_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=WEB_DIST, html=True), name="web")

@@ -1,0 +1,77 @@
+@import "tailwindcss";
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Nocturne — the design system's tokens, carried over verbatim from the
+   design file. These are the source of truth for the look; retune here.
+   ────────────────────────────────────────────────────────────────────────── */
+@theme {
+  --color-bg: #161826;
+  --color-surface: #232532;
+  --color-text: #e9e9ed;
+  --color-accent: #9184d9;
+  --color-accent-2: #a7a1db;
+
+  --color-neutral-100: #f3f5fe;
+  --color-neutral-200: #e4e7f5;
+  --color-neutral-300: #cfd3e5;
+  --color-neutral-400: #b2b6ca;
+  --color-neutral-500: #9397ab;
+  --color-neutral-600: #75798c;
+  --color-neutral-700: #595d6c;
+  --color-neutral-800: #3f424d;
+  --color-neutral-900: #292b31;
+
+  --color-done-ink: #f4f3ff;
+  --color-done-soft: #c8c5f2;
+  --color-done-edge: #cfcbff;
+  --color-live: #57d9a3;
+  --color-alert: #e2857a;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
+
+  --font-heading: "Inter", system-ui, -apple-system, sans-serif;
+  --font-body: "Inter", system-ui, -apple-system, sans-serif;
+}
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  /* The screen is read at a glance while standing; a stray text selection
+     from a mistimed long-press is pure noise. Buttons stay tappable. */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button { font-family: var(--font-heading); }
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+
+/* The sensor-alive dot. Slow enough to read as breathing rather than blinking
+   -- a blinking dot reads as an alarm, and this state is the good one. */
+@keyframes lwBreathe { 0%, 100% { opacity: .85 } 50% { opacity: .35 } }
+
+/* The done halo. */
+@keyframes lwGlow {
+  0%, 100% { box-shadow: 0 0 60px rgba(120,128,235,.30) }
+  50%      { box-shadow: 0 0 110px rgba(120,128,235,.5) }
+}
+
+@keyframes lwRise { from { transform: translateY(14px); opacity: 0 } to { transform: none; opacity: 1 } }
+
+.lw-breathe { animation: lwBreathe 3s ease-in-out infinite; }
+.lw-glow    { animation: lwGlow 3.4s ease-in-out infinite; }
+.lw-rise    { animation: lwRise .22s ease-out both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .lw-breathe, .lw-glow, .lw-rise { animation: none !important; }
+}

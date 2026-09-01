@@ -20,12 +20,25 @@ env/
 # Local database (SQLite)
 *.db
 *.sqlite3
+# WAL sidecars. They exist because db.py sets journal_mode=WAL, and *.db does
+# not match them -- the names end in -wal/-shm, not .db. Note they are not
+# disposable while the server is running: uncommitted pages live in the -wal,
+# so copying laundry.db on its own can lose the most recent marks.
+*.db-wal
+*.db-shm
+*.db-journal
 
 # Web
 node_modules/
 web/dist/
+web/*.tsbuildinfo
 
-# Notes: recordings/ and labels/ ARE committed on purpose -- they are the dataset.
+# Raw recordings -- ~3.4 MB per cycle, and the repo would carry every one of
+# them forever. They live on the laptop that recorded them; back that up
+# yourself, because a wash cannot be re-recorded after the fact.
+# analysis/labels/ IS tracked: it is kilobytes, and it is the part a human made.
+analysis/recordings/
+
 HANDOFF.md
 
 # Node WiFi credentials

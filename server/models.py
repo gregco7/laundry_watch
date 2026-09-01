@@ -87,6 +87,13 @@ class Cycle(Base):
 
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Someone took the laundry out. Separate from ended_at because they are
+    # genuinely different events -- the machine finishing and a human noticing
+    # can be an hour apart, and the gap between them is the only thing this
+    # whole project is trying to shrink.
+    emptied_at: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    emptied_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
     machine: Mapped["Machine"] = relationship(back_populates="cycles")
 
     # order_by is not cosmetic: label.py derives a phase span from one mark to

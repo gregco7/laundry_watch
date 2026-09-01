@@ -155,6 +155,65 @@ class CycleOut(BaseModel):
     marks: list[MarkOut] = Field(default_factory=list)
 
 
+class EmptyIn(BaseModel):
+    """Sent when someone taps 'I've taken it out'."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    by: Optional[str] = Field(default=None, max_length=64)
+
+
+class PhaseEvent(BaseModel):
+    """One phase the machine has been through this cycle."""
+
+    at: float
+    phase: str
+
+
+class StatusOut(BaseModel):
+    """Everything the status screen needs, in one request.
+
+    Composed server-side on purpose. The screen answers one question and it
+    should not have to stitch three endpoints together to do it -- and a phone
+    on a flaky LAN link fails a single request cleanly rather than rendering
+    half a state.
+    """
+
+    # idle | running | done | offline. The screen renders one of four layouts
+    # and nothing else; making the server pick removes the chance that the
+    # client invents a fifth.
+    mode: Literal["idle", "running", "done", "offline"]
+    now: float
+
+    sensor_ok: bool
+    silent_for: Optional[float] = None
+
+    # running
+    cycle_id: Optional[int] = None
+    phase: Optional[str] = None
+    phase_since: Optional[float] = None
+    history: list[PhaseEvent] = Field(default_factory=list)
+
+    # done
+    finished_at: Optional[float] = None
+    emptied_at: Optional[float] = None
+    emptied_by: Optional[str] = None
+
+    # idle -- the last load, so the screen is still worth looking at
+    last_finished_at: Optional[float] = None
+    last_emptied_at: Optional[float] = None
+    last_emptied_by: Optional[str] = None
+
+    # offline
+    last_known_phase: Optional[str] = None
+    last_known_at: Optional[float] = None
+
+    # True once a model exists. Until then `phase` is the last phase a human
+    # marked, not a prediction -- the screen says so rather than implying the
+    # system worked it out.
+    predicted: bool = False
+
+
 class MachineOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

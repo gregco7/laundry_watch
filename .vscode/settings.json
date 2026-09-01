@@ -1,4 +1,17 @@
 {
+  // Search: .gitignore hides files we actually edit (bullet.md or
+  // testing_files/), so don't let it drive search. Exclude the real noise
+  // explicitly instead.
+  "search.useIgnoreFiles": false,
+  "search.exclude": {
+    "**/venv": true,
+    "**/typings": true,
+    "**/__pycache__": true,
+    "**/node_modules": true,
+    "**/.git": true,
+    "web/dist": true
+  },
+
   "python.defaultInterpreterPath": "${workspaceFolder}/venv/bin/python",
   "python.languageServer": "Pylance",
 
