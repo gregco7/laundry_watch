@@ -20,9 +20,24 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 # The label vocabulary, enforced at the API edge and nowhere else. models.Mark
 # stores a plain string, so widening or collapsing this tuple costs one line
-# here rather than a schema change -- which matters, because whether `fill` is
-# separable from `idle` is something the data decides, not you.
-PHASES = ("idle", "fill", "agitate", "spin", "done")
+# here rather than a schema change.
+#
+# These are the washer's own panel names, not invented ones -- "wash", not
+# "agitate" -- so marking is transcription rather than judgement. The one thing
+# you cannot do later is split a label you never marked, which is why the two
+# weak ones are here anyway:
+#
+#   fill  is ~20 s, roughly 8 windows per cycle, maybe 70 in the whole dataset.
+#         Too thin to learn as its own class; expect to collapse it into idle
+#         at training time. Marking it still gives you the start-of-wash edge.
+#   done  is acoustically identical to idle -- a still washer. The model will
+#         never hear it. It is detected as a transition (spin -> quiet, and
+#         stays quiet), which is what pipeline/hmm.py is for. It is also the
+#         only output anyone actually wants, so it gets marked.
+#
+# The stored value is a slug; the phone can label the button whatever the panel
+# says. "Sensing Fill" on screen, "fill" on the wire.
+PHASES = ("idle", "fill", "wash", "rinse", "spin", "done")
 
 # Guards against a malformed body allocating something enormous. The firmware
 # sends 256; anything near this ceiling is a bug, not a longer window.
