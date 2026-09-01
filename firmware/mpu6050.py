@@ -1,7 +1,7 @@
 # MPU-6050 driver: wakes the chip, configures the anti-alias filter and range
 
 from micropython import const
-import time,struct 
+import time,struct
 
 ADDR       = const(0x68) #Sensor Address for MPU 6050, could be 0x69
 EXPECTED_ID = const(0x68) #Always 0x68
