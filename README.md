@@ -8,7 +8,7 @@
 ![React](https://img.shields.io/badge/React-61DAFB?logo=react&logoColor=black)
 
 A local-first web app that tells you whether the washer is running (+ which
-phase it's in) driven by a taped-on vibration sensor and a learned model of
+phase it's in), driven by a taped-on vibration sensor and a learned model of
 what each phase of a cycle looks like in the frequency domain.
 
 Runs entirely on your own machine. No cloud, no hosting.
@@ -16,7 +16,10 @@ Runs entirely on your own machine. No cloud, no hosting.
 ![A held-out wash cycle: predicted phase against the phases marked by hand](docs/held-out-cycle.png)
 
 The top bar is what a person marked on the washer's own panel; the bottom is what
-the model predicted from vibration alone, on a cycle it had never seen. An ESP32 taped to the machine POSTs accelerometer windows over the LAN, and a FastAPI service turns each one into a phase and serves washer-state to a React dashboard.
+the model predicted from vibration alone, on a cycle it had never seen. An ESP32
+taped to the machine POSTs accelerometer windows over the LAN, and a FastAPI
+service turns each one into a phase and serves the washer's state to a React
+dashboard.
 
 ## Layout
 
