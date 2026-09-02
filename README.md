@@ -28,3 +28,7 @@ analysis/   labeling, training, evaluation — the things you run by hand
 web/        Vite + React + Tailwind dashboard
 tests/      24 tests, mostly against a tone whose answer is known in advance
 ```
+
+## Picture of Setup
+
+<img src="docs/washer.jpg" alt="An ESP32 and MPU-6050 taped to the side of the washer" width="360">
