@@ -42,9 +42,11 @@ MPU6050            ESP32 (WROOM-32)
 
 ## Sampling
 
-- **100 Hz**, single axis (the one normal to the panel usually wins — verify per machine).
+- **100 Hz**, all three accelerometer axes. The pipeline sums their power per
+  frequency bin rather than picking one, which makes the fingerprint invariant
+  to how the sensor is oriented — a remount changes nothing.
 - Nyquist gives 50 Hz of usable band, which covers everything a machine does:
-  - Wash agitation: **0.5–3 Hz** (slow rhythmic thump)
+  - Wash: **0.5–3 Hz** (slow rhythmic thump)
   - Fill: near-silent — mostly water noise, may not separate from `idle`
   - Spin cycle: **10–25 Hz** (motor + drum imbalance, the loudest event)
   - Impacts, door slams, leaning: broadband **25–50 Hz+**
