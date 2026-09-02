@@ -31,6 +31,8 @@ import json
 import os
 import threading
 import time
+import numpy as np
+
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -41,6 +43,9 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from pipeline import calibrate, hmm
+from pipeline import model as classifier
+from pipeline.features import MAX_CONTEXT_GAP, extract
 from server.db import REPO_ROOT, get_session, init_db
 from server.models import Cycle, Machine, Mark
 from server.schemas import (
@@ -90,6 +95,48 @@ _buffer: deque[dict[str, Any]] = deque()
 # windows were dropped in flight, which is invisible from arrival times alone.
 _nodes: dict[str, dict[str, Any]] = {}
 
+# --------------------------------------------------------------------------
+# Inference
+#
+# Loaded once at startup, not per request: unpickling the model takes longer
+# than the 2.56 s between windows, so a per-request load would fall behind the
+# node and never catch up.
+#
+# None is a normal state, not an error. Until analysis/train.py has run there
+# is no models/clf-v1.joblib, and the status screen already knows how to say
+# "this is the last phase a human marked" -- a server that refused to start
+# without a model would make the recording tools unusable on a fresh clone,
+# which is exactly when you need them.
+# --------------------------------------------------------------------------
+
+_MODEL: Optional[tuple[Any, dict[str, Any]]] = None
+
+# Per machine: the online filter and the temporal context the delta features
+# need. Kept here rather than in the database because it is a belief about
+# right now, worth nothing after a restart -- and rebuilding it from the ring
+# buffer on startup would be a second code path that could disagree with this
+# one about what the machine is doing.
+_infer: dict[str, dict[str, Any]] = {}
+
+# How long a cached calibration is trusted before it is re-read from the
+# machines row. Long enough to cost nothing, short enough that retraining
+# takes effect without a restart -- analysis/train.py writes a new baseline,
+# and a minute later the running server is using it.
+CALIBRATION_TTL = 60.0
+
+# How long a model-detected finish keeps the screen on "done" when there is no
+# cycle row to acknowledge. Without a cycle there is no "I've taken it out"
+# button that does anything, so this is what eventually returns the screen to
+# idle instead of leaving a finished wash on it forever.
+MODEL_DONE_TTL = 30 * 60.0
+
+# Every prediction the server makes, appended as it is made. Cheap (~150 KB a
+# wash) and the only way to score the model HONESTLY against a cycle it has
+# never seen: re-running it offline afterwards proves the model works, while
+# this proves the running system worked, live, with no lookahead and no second
+# chance. Blind by construction -- it is written before anyone marks anything.
+PREDICTIONS = Path(os.environ.get("LAUNDRY_PREDICTIONS") or REPO_ROOT / "analysis" / "predictions")
+
 
 def _trim(now: float) -> None:
     """Drop windows that have aged out. Called under _lock."""
@@ -119,10 +166,161 @@ def _open_cycle(session: Session, machine_id: str) -> Optional[Cycle]:
     )
 
 
+def _reset_inference(machine_id: str) -> None:
+    """Start believing nothing in particular again.
+
+    Called when a cycle opens and when the node has been silent long enough
+    that the belief is stale. A filter carried across a gap is worse than no
+    filter: it reports the phase the machine was in before the outage with
+    full confidence, and nothing on the screen distinguishes that from a
+    reading taken a second ago.
+    """
+    _infer[machine_id] = {
+        "filter": hmm.Filter(),
+        "prev": None,
+        "history": [],
+        "last_t": None,
+        "phase": None,
+        "phase_since": None,
+        "calibration": None,
+        "calibration_at": 0.0,
+        "finished_at": None,
+    }
+
+
+def _correct_inference(machine_id: str, phase: str, t: float) -> bool:
+    """Push a human's mark into the running filter.
+
+    This is the whole point of the Correct button. Without it a mark is a row
+    in a table that the live system never reads -- which is exactly what
+    happened on 2026-09-01, when the screen sat on the wrong phase through
+    sixteen taps saying otherwise.
+    """
+    state = _infer.get(machine_id)
+    if state is None or state.get("filter") is None:
+        return False
+
+    filt = state["filter"]
+    if phase == "done":
+        # Not a state the filter carries; it is the end of the cycle.
+        state["finished_at"] = t
+        return True
+
+    filt.correct(phase)
+    state["phase"], state["phase_since"] = filt.phase, t
+    # A correction to an earlier phase un-finishes the wash: the human is
+    # saying it is still going.
+    state["finished_at"] = None
+    return True
+
+
+def _calibration(session: Session, machine_id: str, state: dict[str, Any], now: float):
+    """The machine's stored baseline, cached for CALIBRATION_TTL seconds."""
+    if state["calibration"] is None or now - state["calibration_at"] > CALIBRATION_TTL:
+        machine = session.get(Machine, machine_id)
+        state["calibration"] = calibrate.deserialize(machine.calibration if machine else None)
+        state["calibration_at"] = now
+    return state["calibration"]
+
+
+def _log_prediction(node: str, cycle: Optional[Cycle], row: dict[str, Any]) -> None:
+    """Append one prediction. Grouped by recording when a cycle is open so the
+    log and the windows it describes stay together, and by day otherwise."""
+    if cycle is not None and cycle.recording:
+        name = Path(cycle.recording).stem + ".pred.jsonl"
+    else:
+        name = f"{node}-{time.strftime('%Y%m%d', time.localtime(row['t']))}.pred.jsonl"
+    PREDICTIONS.mkdir(parents=True, exist_ok=True)
+    with (PREDICTIONS / name).open("a") as fh:
+        fh.write(json.dumps(row, separators=(",", ":")) + "\n")
+
+
+def _infer_window(session: Session, reading: ReadingIn, t: float,
+                  cycle: Optional[Cycle] = None) -> None:
+    """Run one window through features -> z-score -> classifier -> filter.
+
+    Everything here is best-effort: an exception on this path must not cost a
+    window of the recording, which is unrepeatable, while a prediction is
+    recomputed 23 times a minute. So the caller wraps it and the failure mode
+    is a stale phase on the screen rather than a 500 at the node.
+    """
+    if _MODEL is None:
+        return
+    state = _infer.get(reading.node) or _infer.setdefault(reading.node, {})
+    if not state:
+        _reset_inference(reading.node)
+        state = _infer[reading.node]
+
+    baseline = _calibration(session, reading.node, state, t)
+    if baseline is None:
+        return  # uncalibrated machine: run analysis/train.py
+
+    last_t = state["last_t"]
+    if last_t is not None and t - last_t > SILENT_AFTER:
+        # A hole big enough that the belief is about a different situation.
+        _reset_inference(reading.node)
+        state = _infer[reading.node]
+    elif last_t is not None and t - last_t > MAX_CONTEXT_GAP:
+        # Smaller hole: the deltas would describe a change that never happened,
+        # but what the machine is doing has probably not changed. Same rule as
+        # pipeline/features.extract_sequence, for the same reason.
+        state["prev"], state["history"] = None, []
+
+    frame = np.array([reading.x, reading.y, reading.z], dtype=float)
+    vec, context = extract(frame, reading.hz, prev=state["prev"], history=state["history"])
+
+    clf, _bundle = _MODEL
+    proba = classifier.predict_proba(clf, calibrate.zscore(vec, baseline))[0]
+    # By NAME. sklearn orders classes alphabetically and hmm.STATES is in cycle
+    # order; lining them up by position gives a working system that is wrong
+    # about which phase it is in.
+    filt = state["filter"]
+    filt.update(proba[classifier.class_columns(clf, hmm.STATES)])
+
+    if filt.phase != state["phase"]:
+        state["phase"], state["phase_since"] = filt.phase, t
+
+    # Latched, not recomputed: the wash finishes once. Without the latch a
+    # door slam an hour later would set the machine back to "running" and the
+    # screen would un-finish a load somebody already took out.
+    if filt.finished and state.get("finished_at") is None:
+        state["finished_at"] = t
+
+    state["prev"], state["last_t"] = context, t
+    state["history"].append(context[1])
+    if len(state["history"]) > 5:
+        state["history"].pop(0)
+
+    _log_prediction(reading.node, cycle, {
+        "t": t,
+        # The window's centre as well as its arrival, because analysis/label.py
+        # and pipeline/features.py both work in centres. Storing one and
+        # deriving the other later is how a 1.3-second offset gets into a
+        # scoring script and never comes out.
+        "tc": t - reading.n / (2.0 * reading.hz),
+        "seq": reading.seq,
+        "phase": filt.phase,
+        "conf": round(filt.confidence, 4),
+        # The whole posterior, not just the winner: a wrong call at 0.35 and a
+        # wrong call at 0.99 are different failures, and only one of them is
+        # worth changing the model over.
+        "p": {name: round(float(v), 4) for name, v in zip(filt.states, filt.alpha)},
+        "cycle_id": cycle.id if cycle is not None else None,
+    })
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _MODEL
     init_db()
     RECORDINGS.mkdir(parents=True, exist_ok=True)
+    _MODEL = classifier.try_load()
+    if _MODEL is None:
+        print("no model at models/clf-v1.joblib -- /status will report marks, not predictions")
+    else:
+        meta = _MODEL[1].get("meta", {})
+        print(f"model loaded: trained on cycles {meta.get('cycles')} "
+              f"({meta.get('n_windows')} windows)")
     yield
 
 
@@ -166,6 +364,16 @@ def post_reading(reading: ReadingIn, session: Session = Depends(get_session)) ->
         if cycle is not None and cycle.recording:
             _append_jsonl(RECORDINGS / cycle.recording, [window])
 
+    # After the lock, not inside it: an FFT and a tree ensemble take a few
+    # milliseconds, and holding the ingest lock across them would make every
+    # other window and every dashboard poll wait behind a prediction.
+    try:
+        _infer_window(session, reading, t, cycle)
+    except Exception as exc:  # noqa: BLE001 -- see _infer_window's docstring
+        # A window is unrepeatable and a prediction is not. Never let inference
+        # cost the recording.
+        print(f"inference failed for {reading.node}: {exc!r}")
+
     return ReadingAck(
         ok=True,
         recorded=cycle is not None,
@@ -206,6 +414,11 @@ def start_cycle(body: CycleStart, session: Session = Depends(get_session)) -> Cy
     session.add(cycle)
     session.commit()
 
+    # A new wash starts from the prior, not from whatever the filter believed
+    # about the last one -- otherwise a load started right after a spin begins
+    # life convinced the machine is already finishing.
+    _reset_inference(body.machine_id)
+
     # The whole point of the ring buffer: whatever is still in memory is
     # already part of this wash, so it belongs in this file. Press Start two
     # minutes late and you still get the fill.
@@ -243,6 +456,14 @@ def add_mark(cycle_id: int, body: MarkIn, session: Session = Depends(get_session
     mark = Mark(cycle_id=cycle_id, t=body.t if body.t is not None else time.time(), phase=body.phase)
     session.add(mark)
     session.commit()
+
+    # The screen must change the instant you tap, or you cannot tell a mark
+    # that landed from one that failed -- and with a model loaded the phase on
+    # screen comes from the filter, so recording the mark alone changes nothing
+    # visible. Steering the filter is both the correction and the receipt.
+    with _lock:
+        _correct_inference(cycle.machine_id, mark.phase, mark.t)
+
     return mark
 
 
@@ -319,10 +540,10 @@ def empty_cycle(cycle_id: int, body: EmptyIn, session: Session = Depends(get_ses
 def status(machine_id: str = "washer-01", session: Session = Depends(get_session)) -> StatusOut:
     """One request, one of four states. Everything the status screen renders.
 
-    `phase` is currently the last phase a HUMAN marked, not a prediction --
-    there is no model yet. `predicted` says which it is, so the screen can be
-    honest rather than implying the system worked it out. When
-    pipeline/model.py lands, only this function changes.
+    `phase` comes from the model when one is loaded and has seen a window, and
+    from the last human mark otherwise. `predicted` says which, so the screen
+    is honest about whether the system worked it out or is reading back what
+    you told it.
     """
     now = time.time()
 
@@ -353,6 +574,29 @@ def status(machine_id: str = "washer-01", session: Session = Depends(get_session
             last_known_phase=last_phase, last_known_at=last_at,
         )
 
+    inferred = _infer.get(machine_id) or {}
+    predicted = _MODEL is not None and inferred.get("phase") is not None
+    model_phase = inferred.get("phase") if predicted else None
+    model_done = inferred.get("finished_at") if predicted else None
+
+    # With a model, a cycle row is a RECORDING SESSION, not the washer's state.
+    # Nobody has to tap Record for the machine to be running, so when there is
+    # no open cycle the screen follows the sensor instead of the database.
+    # cycle_id stays None, which the dashboard already handles -- the phase card
+    # reads nothing but phase, phase_since and history.
+    if open_cycle is None and predicted:
+        if model_done is not None and now - model_done < MODEL_DONE_TTL:
+            return StatusOut(
+                mode="done", now=now, sensor_ok=True, silent_for=silent_for,
+                finished_at=model_done, predicted=True,
+            )
+        if model_phase != "idle" and model_done is None:
+            return StatusOut(
+                mode="running", now=now, sensor_ok=True, silent_for=silent_for,
+                phase=model_phase, phase_since=inferred.get("phase_since"),
+                predicted=True,
+            )
+
     # An open cycle is more interesting than a finished one -- a new wash
     # started means the last one stopped mattering, emptied or not.
     cycle = open_cycle or latest
@@ -368,10 +612,18 @@ def status(machine_id: str = "washer-01", session: Session = Depends(get_session
         done_mark = next((m for m in reversed(ms) if m.phase == "done"), None)
         finished_at = done_mark.t if done_mark is not None else cycle.ended_at
 
+        # The point of the whole project: with a model, nobody has to tap Done.
+        # A human mark still wins where one exists -- it is a direct observation
+        # and this is an inference -- but its absence is no longer the same as
+        # the wash not being over.
+        if finished_at is None and predicted and inferred.get("finished_at"):
+            finished_at = inferred["finished_at"]
+
         if finished_at is not None and cycle.emptied_at is None:
             return StatusOut(
                 mode="done", now=now, sensor_ok=True, silent_for=silent_for,
                 cycle_id=cycle.id, finished_at=finished_at, history=history,
+                predicted=predicted and done_mark is None and cycle.ended_at is None,
             )
 
         if finished_at is None and open_cycle is not None:
@@ -379,9 +631,11 @@ def status(machine_id: str = "washer-01", session: Session = Depends(get_session
             return StatusOut(
                 mode="running", now=now, sensor_ok=True, silent_for=silent_for,
                 cycle_id=cycle.id,
-                phase=current.phase if current else None,
-                phase_since=current.t if current else cycle.started_at,
+                phase=inferred["phase"] if predicted else (current.phase if current else None),
+                phase_since=(inferred["phase_since"] if predicted
+                             else (current.t if current else cycle.started_at)),
                 history=history,
+                predicted=predicted,
             )
 
         # Finished and emptied: idle, but the last load is still worth showing.

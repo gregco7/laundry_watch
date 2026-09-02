@@ -1,0 +1,38 @@
+{
+  "file": "washer-01-20260831-231631.jsonl",
+  "machine": "washer-01",
+  "cycle_id": 1,
+  "started_at": 1788232591.136596,
+  "ended_at": 1788235327.6035671,
+  "done_at": null,
+  "open": false,
+  "unlabelled_from": null,
+  "generated_at": 1788295178.6915798,
+  "phases": [
+    {
+      "start": 1788232289.358817,
+      "end": 1788232606.28607,
+      "label": "idle"
+    },
+    {
+      "start": 1788232606.28607,
+      "end": 1788232947.466709,
+      "label": "fill"
+    },
+    {
+      "start": 1788232947.466709,
+      "end": 1788233861.7815669,
+      "label": "wash"
+    },
+    {
+      "start": 1788233861.7815669,
+      "end": 1788234839.402435,
+      "label": "rinse"
+    },
+    {
+      "start": 1788234839.402435,
+      "end": 1788235327.6035671,
+      "label": "spin"
+    }
+  ]
+}
