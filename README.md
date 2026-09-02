@@ -21,6 +21,21 @@ taped to the machine POSTs accelerometer windows over the LAN, and a FastAPI
 service turns each one into a phase and serves the washer's state to a React
 dashboard.
 
+## Running it
+
+```bash
+python -m venv venv && venv/bin/pip install -r requirements.txt
+venv/bin/uvicorn server.main:app --host 0.0.0.0   # dashboard at :8000
+```
+
+Record a few cycles from the dashboard, then train on your own washer:
+
+```bash
+venv/bin/python analysis/label.py --all   # marks -> labels
+venv/bin/python analysis/train.py         # -> models/clf-v1.joblib
+venv/bin/python analysis/evaluate.py      # held out by whole cycle
+```
+
 ## Layout
 
 ```
@@ -32,6 +47,6 @@ web/        Vite + React + Tailwind dashboard
 tests/      24 tests, mostly against a tone whose answer is known in advance
 ```
 
-## Picture of Setup
+## Picture (see HARDWARE.md for details)
 
 <img src="docs/washer.jpg" alt="An ESP32 and MPU-6050 taped to the side of the washer" width="360">
